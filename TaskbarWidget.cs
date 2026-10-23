@@ -15,6 +15,7 @@ internal enum WidgetPart
     Next,
     Volume,
     Progress,
+    AddToPlaylist,
 }
 
 internal enum WidgetPlacement
@@ -71,6 +72,26 @@ internal sealed class TaskbarWidget : NativeWindow, IDisposable
 
     /// <summary>Text shown when no media session is available (e.g. API failure).</summary>
     public string? StatusText { get; set; }
+
+    /// <summary>Decides whether the add-to-playlist button is shown (YouTube Music sources only).</summary>
+    public Func<bool>? PlaylistButtonVisible { get; set; }
+
+    private string? _flashText;
+    private DateTime _flashUntil;
+
+    /// <summary>Temporarily replaces the second line with a message, e.g. "Added to My playlist".</summary>
+    public void Flash(string text, TimeSpan duration)
+    {
+        _flashText = text;
+        _flashUntil = DateTime.UtcNow + duration;
+        Render();
+    }
+
+    private bool ShowsPlaylistButton => PlaylistButtonVisible?.Invoke() == true;
+
+    private WidgetPart[] ButtonParts => ShowsPlaylistButton
+        ? [WidgetPart.Previous, WidgetPart.PlayPause, WidgetPart.Next, WidgetPart.AddToPlaylist, WidgetPart.Volume]
+        : [WidgetPart.Previous, WidgetPart.PlayPause, WidgetPart.Next, WidgetPart.Volume];
 
     public bool IsAttached => Handle != IntPtr.Zero && IsWindow(Handle) && _tray != IntPtr.Zero && IsWindow(_tray);
 
@@ -166,7 +187,9 @@ internal sealed class TaskbarWidget : NativeWindow, IDisposable
         bool moved = UpdateLayout();
         // Explorer occasionally re-orders its own children; stay on top of the XAML content.
         SetWindowPos(Handle, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        if (!moved && _media.IsPlaying && _media.Duration > TimeSpan.Zero) Render();
+        bool flashExpired = _flashText is not null && DateTime.UtcNow >= _flashUntil;
+        if (flashExpired) _flashText = null;
+        if (!moved && (flashExpired || (_media.IsPlaying && _media.Duration > TimeSpan.Zero))) Render();
     }
 
     /// <summary>Measures the free taskbar space on a background thread, then re-lays out.</summary>
@@ -223,8 +246,9 @@ internal sealed class TaskbarWidget : NativeWindow, IDisposable
         int height = band.Height;
         int available = gap.Width - 2 * margin;
 
-        _buttonWidth = Math.Clamp(available / 4f, 26 * s, 34 * s);
-        float buttonsWidth = 4 * _buttonWidth;
+        int buttonCount = ButtonParts.Length;
+        _buttonWidth = Math.Clamp(available / (float)buttonCount, 26 * s, 34 * s);
+        float buttonsWidth = buttonCount * _buttonWidth;
         float infoFixed = 4 * s + (_settings.ShowCover ? CoverSize(height) + 8 * s : 0);
         float textWidth = 0;
         bool showInfo;
@@ -245,7 +269,8 @@ internal sealed class TaskbarWidget : NativeWindow, IDisposable
         // Child window coordinates are relative to the taskbar window.
         var bounds = new Rectangle(x - tray.Left, band.Top - tray.Top, width, height);
 
-        bool changed = bounds != _bounds || showInfo != _showInfo || Math.Abs(textWidth - _textWidth) > 0.5f;
+        bool changed = bounds != _bounds || showInfo != _showInfo || Math.Abs(textWidth - _textWidth) > 0.5f
+            || buttonCount != _buttonRects.Count;
         if (!changed) return false;
 
         _bounds = bounds;
@@ -306,7 +331,7 @@ internal sealed class TaskbarWidget : NativeWindow, IDisposable
         }
 
         _buttonRects.Clear();
-        foreach (var part in new[] { WidgetPart.Previous, WidgetPart.PlayPause, WidgetPart.Next, WidgetPart.Volume })
+        foreach (var part in ButtonParts)
         {
             _buttonRects[part] = new RectangleF(x, 0, _buttonWidth, h);
             x += _buttonWidth;
@@ -342,6 +367,7 @@ internal sealed class TaskbarWidget : NativeWindow, IDisposable
             DrawGlyph(g, WidgetPart.Previous, Glyphs.Previous, 15, !hasSession || _media.CanPrevious, fg);
             DrawGlyph(g, WidgetPart.PlayPause, _media.IsPlaying ? Glyphs.Pause : Glyphs.Play, 18, true, fg);
             DrawGlyph(g, WidgetPart.Next, Glyphs.Next, 15, !hasSession || _media.CanNext, fg);
+            DrawGlyph(g, WidgetPart.AddToPlaylist, Glyphs.AddToPlaylist, 15, true, fg);
             DrawGlyph(g, WidgetPart.Volume, Glyphs.ForVolume(_volume, _muted), 16, true, fg);
         }
         UpdateLayered(Handle, bmp);
@@ -400,6 +426,7 @@ internal sealed class TaskbarWidget : NativeWindow, IDisposable
         {
             title = string.IsNullOrWhiteSpace(_media.Title) ? _media.SourceName ?? Strings.Unknown : _media.Title!;
             subtitle = string.IsNullOrWhiteSpace(_media.Artist) ? _media.SourceName : _media.Artist;
+            if (_flashText is not null && DateTime.UtcNow < _flashUntil) subtitle = _flashText;
         }
         else
         {
@@ -633,6 +660,7 @@ internal sealed class TaskbarWidget : NativeWindow, IDisposable
             WidgetPart.Previous => Strings.Previous,
             WidgetPart.PlayPause => !_media.HasSession ? Strings.StartMusicApp : _media.IsPlaying ? Strings.Pause : Strings.Play,
             WidgetPart.Next => Strings.Next,
+            WidgetPart.AddToPlaylist => Strings.AddToPlaylistTip,
             WidgetPart.Volume => _muted ? Strings.Muted : Strings.VolumeTip((int)Math.Round(_volume * 100)),
             _ => null,
         };

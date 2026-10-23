@@ -1,5 +1,6 @@
 using Microsoft.Win32;
 using TaskbarPlayer.Native;
+using TaskbarPlayer.YouTube;
 
 namespace TaskbarPlayer;
 
@@ -15,7 +16,9 @@ internal sealed class TrayApp : ApplicationContext
     private readonly MessageWindow _messages = new();
     private readonly System.Windows.Forms.Timer _timer = new() { Interval = 500 };
     private ContextMenuStrip _menu = new();
+    private readonly YouTubeService _youtube = new();
     private VolumePopup? _volumePopup;
+    private bool _youtubeSetupOpen;
     private float _volume;
     private bool _muted;
 
@@ -33,7 +36,14 @@ internal sealed class TrayApp : ApplicationContext
         _widget.WheelScrolled += delta => ChangeVolume(Math.Sign(delta) * WheelVolumeStep);
         _widget.SeekRequested += fraction =>
             RunAsync(() => _media.SeekAsync(TimeSpan.FromTicks((long)(_media.Duration.Ticks * (double)fraction))));
-        _media.Changed += (_, _) => _widget.Render();
+        // YouTube sources: like / YouTube playlists. With MuSync installed: any track can go to the Garmin.
+        _widget.PlaylistButtonVisible = () => _media.HasSession && (_media.IsYouTubeCapableSource || MuSync.IsAvailable);
+        _media.Changed += (_, _) =>
+        {
+            _widget.UpdateLayout(); // the playlist button comes and goes with the source
+            _widget.Render();
+        };
+        _youtube.Load();
 
         // Explorer restarted: our child window died with the old taskbar.
         _messages.TaskbarCreated += () => _widget.Attach();
@@ -79,6 +89,7 @@ internal sealed class TrayApp : ApplicationContext
                 break;
             case WidgetPart.Next: RunAsync(_media.NextAsync); break;
             case WidgetPart.Volume: ToggleVolumePopup(screenRect); break;
+            case WidgetPart.AddToPlaylist: ShowPlaylistMenu(screenRect); break;
             case WidgetPart.Info:
                 ShowPopupMenu(_media.HasSession ? FillSourceItems : FillLaunchItems, screenRect);
                 break;
@@ -106,6 +117,145 @@ internal sealed class TrayApp : ApplicationContext
         }
         // Pick up apps installed since the last scan, for next time.
         _ = MusicApps.RefreshAsync();
+    }
+
+    // ---------------------------------------------------------------- YouTube Music playlists
+
+    private void ShowPlaylistMenu(Rectangle anchor)
+    {
+        // Capture the track now: it may change while the menu is open.
+        string? title = _media.Title;
+        string? artist = _media.Artist;
+        bool musicOnly = _media.SourceName == "YouTube Music";
+        bool youtubeSource = _media.IsYouTubeCapableSource;
+        if (string.IsNullOrWhiteSpace(title)) return;
+
+        if (youtubeSource && !_youtube.IsConnected && !MuSync.IsAvailable)
+        {
+            OpenYouTubeSetup();
+            return;
+        }
+
+        var menu = new ContextMenuStrip();
+        ToolStripMenuItem? loading = null;
+        if (youtubeSource && _youtube.IsConnected)
+        {
+            menu.Items.Add(new ToolStripMenuItem(Strings.LikeSong, null, (_, _) =>
+                RunYouTube(async () =>
+                {
+                    if (await FindTrackAsync(title, artist, musicOnly) is not YouTubeVideo video) return;
+                    await _youtube.LikeAsync(video.Id);
+                    _widget.Flash(Strings.Liked, TimeSpan.FromSeconds(4));
+                })));
+            menu.Items.Add(new ToolStripSeparator());
+            loading = new ToolStripMenuItem(Strings.Loading) { Enabled = false };
+            menu.Items.Add(loading);
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add(new ToolStripMenuItem(Strings.RefreshPlaylists, null, (_, _) =>
+                RunYouTube(() => _youtube.GetPlaylistsAsync(refresh: true))));
+        }
+        else if (youtubeSource)
+        {
+            menu.Items.Add(new ToolStripMenuItem(Strings.ConnectYouTube, null, (_, _) => OpenYouTubeSetup()));
+        }
+
+        if (MuSync.IsAvailable)
+        {
+            if (menu.Items.Count > 0) menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add(new ToolStripMenuItem(Strings.MuSyncHeader) { Enabled = false });
+            foreach (string playlist in MuSync.GetPlaylists())
+            {
+                menu.Items.Add(new ToolStripMenuItem("⌚  " + playlist, null, (_, _) =>
+                    RunYouTube(() => AddToMuSyncAsync(title, artist, playlist))));
+            }
+        }
+
+        menu.Closed += (_, _) => _invoker.BeginInvoke(new Action(menu.Dispose));
+        ShowMenu(menu, new Point(anchor.Left, anchor.Top));
+        if (loading is not null) _ = FillPlaylistsAsync(menu, loading, title, artist, musicOnly);
+    }
+
+    private async Task AddToMuSyncAsync(string title, string? artist, string playlist)
+    {
+        _widget.Flash(Strings.DownloadingForGarmin, TimeSpan.FromMinutes(5));
+        var result = await MuSync.AddAsync(title, artist, playlist);
+        _widget.Flash(result.Ok ? Strings.AddedToMuSync(playlist) : result.Message ?? "MuSync", TimeSpan.FromSeconds(6));
+    }
+
+    private async Task FillPlaylistsAsync(ContextMenuStrip menu, ToolStripMenuItem placeholder, string title, string? artist, bool musicOnly)
+    {
+        try
+        {
+            var playlists = await _youtube.GetPlaylistsAsync();
+            if (menu.IsDisposed) return;
+
+            int index = menu.Items.IndexOf(placeholder);
+            menu.Items.Remove(placeholder);
+            if (playlists.Count == 0)
+            {
+                menu.Items.Insert(index, new ToolStripMenuItem(Strings.NoPlaylists) { Enabled = false });
+            }
+            foreach (var playlist in playlists)
+            {
+                menu.Items.Insert(index++, new ToolStripMenuItem(playlist.Title, null, (_, _) =>
+                    RunYouTube(async () =>
+                    {
+                        if (await FindTrackAsync(title, artist, musicOnly) is not YouTubeVideo video) return;
+                        await _youtube.AddToPlaylistAsync(playlist.Id, video.Id);
+                        _widget.Flash(Strings.AddedTo(playlist.Title), TimeSpan.FromSeconds(4));
+                    })));
+            }
+        }
+        catch (Exception ex)
+        {
+            if (!menu.IsDisposed) placeholder.Text = DescribeError(ex);
+        }
+    }
+
+    private async Task<YouTubeVideo?> FindTrackAsync(string title, string? artist, bool musicOnly)
+    {
+        _widget.Flash(Strings.Searching, TimeSpan.FromSeconds(15));
+        var video = await _youtube.FindVideoAsync(title, artist, musicOnly);
+        if (video is null) _widget.Flash(Strings.NotFoundOnYouTube, TimeSpan.FromSeconds(4));
+        else Log.Write($"YouTube match for '{artist} - {title}': {video.Title} [{video.Channel}] {video.Id}");
+        return video;
+    }
+
+    private async void RunYouTube(Func<Task> action)
+    {
+        try
+        {
+            await action();
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"YouTube action failed: {ex}");
+            _widget.Flash(DescribeError(ex), TimeSpan.FromSeconds(6));
+        }
+    }
+
+    private static string DescribeError(Exception ex) => ex switch
+    {
+        YouTubeException { IsQuotaExceeded: true } => Strings.QuotaExceeded,
+        _ => ex.Message,
+    };
+
+    private void OpenYouTubeSetup()
+    {
+        if (_youtubeSetupOpen) return;
+        _youtubeSetupOpen = true;
+        try
+        {
+            using var form = new YouTubeSetupForm(_youtube);
+            if (form.ShowDialog() == DialogResult.OK)
+            {
+                _widget.Flash("✓ YouTube", TimeSpan.FromSeconds(3));
+            }
+        }
+        finally
+        {
+            _youtubeSetupOpen = false;
+        }
     }
 
     // ---------------------------------------------------------------- volume
@@ -216,6 +366,14 @@ internal sealed class TrayApp : ApplicationContext
         _menu.Opening += (_, _) => autostart.Checked = Autostart.IsEnabled;
 
         // Language names are shown in their own language.
+        var youtube = new ToolStripMenuItem();
+        youtube.Click += async (_, _) =>
+        {
+            if (_youtube.IsConnected) await _youtube.DisconnectAsync();
+            else OpenYouTubeSetup();
+        };
+        _menu.Opening += (_, _) => youtube.Text = _youtube.IsConnected ? Strings.DisconnectYouTube : Strings.ConnectYouTube;
+
         var language = new ToolStripMenuItem(Strings.LanguageMenu);
         foreach (var (lang, name) in new[] { (AppLanguage.English, "English"), (AppLanguage.Dutch, "Nederlands") })
         {
@@ -231,6 +389,7 @@ internal sealed class TrayApp : ApplicationContext
             showCover,
             showTitle,
             autostart,
+            youtube,
             language,
             new ToolStripSeparator(),
             new ToolStripMenuItem(Strings.Exit, null, (_, _) => ExitThread()),
@@ -365,6 +524,7 @@ internal sealed class TrayApp : ApplicationContext
             _media.Dispose();
             _menu.Dispose();
             _volumePopup?.Dispose();
+            _youtube.Dispose();
             _messages.DestroyHandle();
             _invoker.Dispose();
         }

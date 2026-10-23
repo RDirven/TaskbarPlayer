@@ -15,6 +15,8 @@ internal static class Glyphs
     public const string Volume2 = "";
     public const string Volume3 = "";
     public const string MusicNote = "";
+    public const string AddToPlaylist = ""; // "Add" (+)
+    public const string Heart = "";
 
     public static readonly string FontFamilyName =
         IsFontInstalled("Segoe Fluent Icons") ? "Segoe Fluent Icons" : "Segoe MDL2 Assets";

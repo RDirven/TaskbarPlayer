@@ -37,6 +37,7 @@ internal static class MusicApps
             try
             {
                 s_cached = Scan();
+                MuSync.Detect();
             }
             catch (Exception ex)
             {

@@ -373,9 +373,23 @@ internal sealed class MediaController : IDisposable
         }
     }
 
+    // Chromium extension id of the YouTube Music web app (same in Chrome, Edge and Brave).
+    private const string YouTubeMusicPwaId = "cinhimbnkkghhklpknlkffjgod";
+
+    private static readonly string[] BrowserNames =
+        ["Google Chrome", "Microsoft Edge", "Firefox", "Brave", "Opera", "Vivaldi"];
+
+    /// <summary>True for the YouTube Music app, or a browser (which may be playing YouTube Music in a tab).</summary>
+    public bool IsYouTubeCapableSource =>
+        SourceName is string name && (name == "YouTube Music" || BrowserNames.Contains(name));
+
     public static string FriendlyName(string appId)
     {
         string id = appId.ToLowerInvariant();
+        // Installed web apps (PWAs) report the browser plus an app id; match them against the Start menu entries.
+        var installed = MusicApps.Installed.FirstOrDefault(a => string.Equals(a.AppId, appId, StringComparison.OrdinalIgnoreCase));
+        if (installed is not null) return installed.Name;
+        if (id.Contains(YouTubeMusicPwaId)) return "YouTube Music";
         if (id.Contains("spotify")) return "Spotify";
         if (id.Contains("music.youtube") || id.Contains("youtube music") || id.Contains("youtubemusic")) return "YouTube Music";
         if (id.Contains("msedge")) return "Microsoft Edge";
