@@ -429,8 +429,12 @@ internal sealed class TrayApp : ApplicationContext
         items.Add(launch);
     }
 
-    private static void ShowMenu(ContextMenuStrip menu, Point screenPoint) =>
+    private void ShowMenu(ContextMenuStrip menu, Point screenPoint)
+    {
+        // Menus dismiss on outside clicks only if we own the foreground window.
+        NativeMethods.SetForegroundWindow(_messages.Handle);
         menu.Show(screenPoint, ToolStripDropDownDirection.AboveRight);
+    }
 
     private void SelectSource(string? appId)
     {
