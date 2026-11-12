@@ -60,7 +60,7 @@ does not need the YouTube account connection.
 
 ## Build and run
 
-Requires Windows 10 (2004) or later and the [.NET 9 SDK](https://dotnet.microsoft.com/download).
+Requires Windows 10 (2004) or later and the [.NET 10 SDK](https://dotnet.microsoft.com/download).
 
 ```bash
 dotnet run -c Release
